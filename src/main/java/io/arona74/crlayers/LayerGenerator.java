@@ -310,11 +310,8 @@ public class LayerGenerator {
     }
     
     /**
-     * Calculate layer values based on distance to nearest higher edge
-     * @param validPositions Positions where we should place layers (filtered)
-     * @param fullHeightmap Complete heightmap including holes (for distance calculations)
-     * @param edges All edge positions
-     * @param targetChunks Chunks to process
+     * Calculate layer values using Y-level pass approach
+     * Processes each Y level separately to properly handle holes vs cliffs
      */
     private Map<BlockPos, Integer> calculateLayerValues(Map<BlockPos, Integer> validPositions,
                                                         Map<BlockPos, Integer> fullHeightmap,
@@ -322,48 +319,148 @@ public class LayerGenerator {
                                                         Set<ChunkPos> targetChunks) {
         Map<BlockPos, Integer> layerValues = new HashMap<>();
         
-        boolean useSmoothMode = false;
-        if (LayerConfig.MODE == LayerConfig.GenerationMode.SMOOTH) {
-            useSmoothMode = isTerrainFlat(fullHeightmap, targetChunks);
-            CRLayers.LOGGER.info("Terrain analysis: {} (using {} gradient)", 
-                useSmoothMode ? "FLAT" : "STEEP",
-                useSmoothMode ? "smooth" : "sharp");
+        // Group positions by Y level
+        Map<Integer, List<BlockPos>> positionsByY = new HashMap<>();
+        for (Map.Entry<BlockPos, Integer> entry : validPositions.entrySet()) {
+            int y = entry.getValue();
+            positionsByY.computeIfAbsent(y, k -> new ArrayList<>()).add(entry.getKey());
         }
         
-        // Process only VALID positions, but use FULL heightmap for distance calculations
-        for (Map.Entry<BlockPos, Integer> entry : validPositions.entrySet()) {
-            BlockPos pos = entry.getKey();
-            int posHeight = entry.getValue();
+        // Process each Y level
+        for (Map.Entry<Integer, List<BlockPos>> yLevel : positionsByY.entrySet()) {
+            int currentY = yLevel.getKey();
+            List<BlockPos> positions = yLevel.getValue();
             
-            ChunkPos posChunk = new ChunkPos(pos);
-            if (!targetChunks.contains(posChunk)) continue;
+            CRLayers.LOGGER.info("Processing Y={} with {} positions", currentY, positions.size());
             
-            if (edges.containsKey(pos)) continue;
-            
-            int distanceToHigher = calculateDistanceToHigherEdge(pos, posHeight, edges);
-            if (distanceToHigher == Integer.MAX_VALUE) continue;
-            
-            // Use FULL heightmap for distance calculation (includes holes)
-            int distanceToLower = calculateDistanceToLowerOrSameEdge(pos, posHeight, fullHeightmap);
-            int availableSpace = distanceToHigher + distanceToLower;
-            
-            int layers;
-            if (useSmoothMode) {
-                layers = calculateAdaptiveSmoothLayers(distanceToHigher, availableSpace);
-            } else {
-                layers = calculateAdaptiveBasicLayers(distanceToHigher, availableSpace);
-            }
-            
-            if (layers > 0) {
-                layerValues.put(pos, layers);
-                if (availableSpace < 7) {
-                    CRLayers.LOGGER.info("Narrow shelf: {} (Y={}) - {} layers (dist={}, space={})", 
-                        pos, posHeight, layers, distanceToHigher, availableSpace);
+            // For each position at this Y level
+            for (BlockPos pos : positions) {
+                ChunkPos posChunk = new ChunkPos(pos);
+                if (!targetChunks.contains(posChunk)) continue;
+                
+                // Skip edges
+                if (edges.containsKey(pos)) continue;
+                
+                // Check if we're at the base of higher terrain
+                int distanceToHigherTerrain = findDistanceToHigherTerrain(pos, currentY, fullHeightmap);
+                
+                if (distanceToHigherTerrain == Integer.MAX_VALUE) {
+                    // No higher terrain nearby, skip
+                    continue;
+                }
+                
+                // Find how much space we have at this Y level before hitting an edge/hole
+                int spaceAtSameLevel = findSpaceAtSameLevel(pos, currentY, fullHeightmap, edges);
+                
+                // Total available space
+                int availableSpace = distanceToHigherTerrain + spaceAtSameLevel;
+                
+                // Calculate layers
+                int layers = calculateAdaptiveBasicLayers(distanceToHigherTerrain, availableSpace);
+                
+                if (layers > 0) {
+                    layerValues.put(pos, layers);
+                    
+                    if (availableSpace < 7 || distanceToHigherTerrain <= 2) {
+                        CRLayers.LOGGER.info("Y={} pos {} - distToHigher={}, spaceAtLevel={}, total={} -> {} layers",
+                            currentY, pos, distanceToHigherTerrain, spaceAtSameLevel, availableSpace, layers);
+                    }
                 }
             }
         }
         
         return layerValues;
+    }
+
+    /**
+     * Find distance to nearest higher terrain (any Y level above current)
+     */
+    private int findDistanceToHigherTerrain(BlockPos pos, int currentY, Map<BlockPos, Integer> heightmap) {
+        int minDistance = Integer.MAX_VALUE;
+        int searchRadius = LayerConfig.MAX_LAYER_DISTANCE + 2;
+        
+        // Create XZ lookup for quick access
+        Map<String, Integer> xzToHeight = new HashMap<>();
+        for (Map.Entry<BlockPos, Integer> entry : heightmap.entrySet()) {
+            String key = entry.getKey().getX() + "," + entry.getKey().getZ();
+            xzToHeight.put(key, entry.getValue());
+        }
+        
+        // Check all positions within search radius
+        for (int dx = -searchRadius; dx <= searchRadius; dx++) {
+            for (int dz = -searchRadius; dz <= searchRadius; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                
+                String key = (pos.getX() + dx) + "," + (pos.getZ() + dz);
+                Integer neighborHeight = xzToHeight.get(key);
+                
+                if (neighborHeight != null && neighborHeight > currentY) {
+                    // Found higher terrain
+                    int distance = Math.abs(dx) + Math.abs(dz); // Manhattan distance
+                    minDistance = Math.min(minDistance, distance);
+                }
+            }
+        }
+        
+        return minDistance;
+    }
+
+    /**
+     * Find how much space exists at the same Y level before hitting edge/hole
+     * This determines available space for gradient at this specific elevation
+     */
+    private int findSpaceAtSameLevel(BlockPos pos, int currentY, Map<BlockPos, Integer> heightmap, Map<BlockPos, Integer> edges) {
+        int minDistanceToEdge = LayerConfig.MAX_LAYER_DISTANCE;
+        int searchRadius = LayerConfig.MAX_LAYER_DISTANCE + 2;
+        
+        // Create XZ lookup
+        Map<String, Integer> xzToHeight = new HashMap<>();
+        for (Map.Entry<BlockPos, Integer> entry : heightmap.entrySet()) {
+            String key = entry.getKey().getX() + "," + entry.getKey().getZ();
+            xzToHeight.put(key, entry.getValue());
+        }
+        
+        // Walk in all 8 directions at same Y level
+        int[] offsets = {-1, 0, 1};
+        
+        for (int dx : offsets) {
+            for (int dz : offsets) {
+                if (dx == 0 && dz == 0) continue;
+                
+                // Walk in this direction until we hit:
+                // 1. Missing terrain (hole/gap)
+                // 2. Different Y level
+                // 3. An edge block
+                for (int dist = 1; dist <= searchRadius; dist++) {
+                    int checkX = pos.getX() + (dx * dist);
+                    int checkZ = pos.getZ() + (dz * dist);
+                    String key = checkX + "," + checkZ;
+                    
+                    Integer checkHeight = xzToHeight.get(key);
+                    
+                    // Hit a hole/missing terrain
+                    if (checkHeight == null) {
+                        minDistanceToEdge = Math.min(minDistanceToEdge, dist);
+                        break;
+                    }
+                    
+                    // Hit different Y level (terrain rises or drops)
+                    if (checkHeight != currentY) {
+                        minDistanceToEdge = Math.min(minDistanceToEdge, dist);
+                        break;
+                    }
+                    
+                    // Hit an edge block
+                    BlockPos checkPos = new BlockPos(checkX, currentY, checkZ);
+                    if (edges.containsKey(checkPos)) {
+                        minDistanceToEdge = Math.min(minDistanceToEdge, dist);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        return minDistanceToEdge;
     }
 
     /**
