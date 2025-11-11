@@ -52,6 +52,7 @@ public class PlantMappingRegistry {
         registerPlantMapping(Blocks.LILAC, "conquest:lilac");
         registerPlantMapping(Blocks.ROSE_BUSH, "conquest:rose_bush");
         registerPlantMapping(Blocks.PEONY, "conquest:peony");
+        //registerPlantMapping(Blocks.SWEET_BERRY_BUSH, "conquest:xxx");
         
         CRLayers.LOGGER.info("Registered {} plant mappings", vanillaToConquestPlant.size());
     }

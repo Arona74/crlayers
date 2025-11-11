@@ -48,6 +48,7 @@ public class BlockMappingRegistry {
         
         // Sand and gravel
         blockToLayerMapping.put(Blocks.SAND, "conquest:sand_layer");
+        blockToLayerMapping.put(Blocks.RED_SAND, "conquest:red_sand_layer");
         blockToLayerMapping.put(Blocks.GRAVEL, "conquest:gravel_layer");
         
         // Other terrain

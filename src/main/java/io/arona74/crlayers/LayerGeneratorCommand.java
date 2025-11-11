@@ -37,7 +37,7 @@ public class LayerGeneratorCommand {
             .executes(LayerGeneratorCommand::executeRemoveDefault)
         );
         
-        // Simplified configuration commands
+        // Configuration commands
         dispatcher.register(CommandManager.literal("layerConfig")
             .requires(source -> source.hasPermissionLevel(2))
             
@@ -60,6 +60,20 @@ public class LayerGeneratorCommand {
             .then(CommandManager.literal("edgeThreshold")
                 .then(CommandManager.argument("blocks", IntegerArgumentType.integer(1, 5))
                     .executes(LayerGeneratorCommand::setEdgeThreshold)))
+            
+            .then(CommandManager.literal("smoothingCycles")
+                .then(CommandManager.argument("cycles", IntegerArgumentType.integer(0, 20))
+                    .executes(LayerGeneratorCommand::setSmoothingCycles)))
+            
+            .then(CommandManager.literal("roundingMode")
+                .then(CommandManager.argument("mode", StringArgumentType.word())
+                    .suggests((context, builder) -> {
+                        builder.suggest("up");
+                        builder.suggest("down");
+                        builder.suggest("nearest");
+                        return builder.buildFuture();
+                    })
+                    .executes(LayerGeneratorCommand::setRoundingMode)))
         );
 
         // Debug log & file command
@@ -207,6 +221,10 @@ public class LayerGeneratorCommand {
             "§eMax Distance: §f%d blocks", LayerConfig.MAX_LAYER_DISTANCE)), false);
         source.sendFeedback(() -> Text.literal(String.format(
             "§eEdge Threshold: §f%d blocks", LayerConfig.EDGE_HEIGHT_THRESHOLD)), false);
+        source.sendFeedback(() -> Text.literal(String.format(
+            "§eSmoothing Cycles: §f%d", LayerConfig.SMOOTHING_CYCLES)), false);
+        source.sendFeedback(() -> Text.literal(String.format(
+            "§eRounding Mode: §f%s", LayerConfig.SMOOTHING_ROUNDING_MODE.name())), false);
         
         String modeDesc = LayerConfig.MODE == LayerConfig.GenerationMode.BASIC ?
             "§7Linear gradient: 7→6→5→4→3→2→1" :
@@ -256,6 +274,40 @@ public class LayerGeneratorCommand {
         LayerConfig.EDGE_HEIGHT_THRESHOLD = value;
         source.sendFeedback(() -> Text.literal(
             String.format("§aSet edge threshold to: §f%d blocks", value)), true);
+        
+        return 1;
+    }
+    
+    private static int setSmoothingCycles(CommandContext<ServerCommandSource> context) {
+        ServerCommandSource source = context.getSource();
+        int value = IntegerArgumentType.getInteger(context, "cycles");
+        
+        LayerConfig.SMOOTHING_CYCLES = value;
+        source.sendFeedback(() -> Text.literal(
+            String.format("§aSet smoothing cycles to: §f%d", value)), true);
+        
+        return 1;
+    }
+    
+    private static int setRoundingMode(CommandContext<ServerCommandSource> context) {
+        ServerCommandSource source = context.getSource();
+        String modeName = StringArgumentType.getString(context, "mode").toLowerCase();
+        
+        LayerConfig.RoundingMode mode = switch (modeName) {
+            case "up" -> LayerConfig.RoundingMode.UP;
+            case "down" -> LayerConfig.RoundingMode.DOWN;
+            case "nearest" -> LayerConfig.RoundingMode.NEAREST;
+            default -> {
+                source.sendError(Text.literal("§cUnknown rounding mode. Use: up, down, or nearest"));
+                yield null;
+            }
+        };
+        
+        if (mode == null) return 0;
+        
+        LayerConfig.SMOOTHING_ROUNDING_MODE = mode;
+        source.sendFeedback(() -> Text.literal(
+            String.format("§aSet rounding mode to: §f%s", mode.name())), true);
         
         return 1;
     }

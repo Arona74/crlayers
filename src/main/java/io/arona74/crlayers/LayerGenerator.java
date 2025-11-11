@@ -14,6 +14,8 @@ import net.minecraft.world.Heightmap;
 import java.nio.file.Path;
 import java.util.*;
 
+import io.arona74.crlayers.LayerConfig.RoundingMode;
+
 /**
  * Simplified chunk-based layer generator using distance-from-edge algorithm
  */
@@ -310,66 +312,389 @@ public class LayerGenerator {
     }
     
     /**
-     * Calculate layer values using Y-level pass approach
-     * Processes each Y level separately to properly handle holes vs cliffs
+     * Calculate layer values using per-Y-level processing with spreading and smoothing
      */
     private Map<BlockPos, Integer> calculateLayerValues(Map<BlockPos, Integer> validPositions,
                                                         Map<BlockPos, Integer> fullHeightmap,
                                                         Map<BlockPos, Integer> edges,
                                                         Set<ChunkPos> targetChunks) {
+        
         Map<BlockPos, Integer> layerValues = new HashMap<>();
         
-        // Group positions by Y level
-        Map<Integer, List<BlockPos>> positionsByY = new HashMap<>();
-        for (Map.Entry<BlockPos, Integer> entry : validPositions.entrySet()) {
-            int y = entry.getValue();
-            positionsByY.computeIfAbsent(y, k -> new ArrayList<>()).add(entry.getKey());
+        // Get all unique Y levels
+        Set<Integer> allYLevels = new HashSet<>(fullHeightmap.values());
+        List<Integer> sortedYLevels = new ArrayList<>(allYLevels);
+        Collections.sort(sortedYLevels, Collections.reverseOrder()); // Highest to lowest
+        
+        if (sortedYLevels.size() < 2) {
+            CRLayers.LOGGER.info("Not enough Y levels to process");
+            return layerValues;
         }
         
-        // Process each Y level
-        for (Map.Entry<Integer, List<BlockPos>> yLevel : positionsByY.entrySet()) {
-            int currentY = yLevel.getKey();
-            List<BlockPos> positions = yLevel.getValue();
+        CRLayers.LOGGER.info("Processing {} Y levels (from {} to {})", 
+            sortedYLevels.size(), 
+            sortedYLevels.get(0),
+            sortedYLevels.get(sortedYLevels.size()-1));
+        
+        // Create XZ lookup for full heightmap
+        Map<String, Integer> xzToHeight = new HashMap<>();
+        for (Map.Entry<BlockPos, Integer> entry : fullHeightmap.entrySet()) {
+            String key = entry.getKey().getX() + "," + entry.getKey().getZ();
+            xzToHeight.put(key, entry.getValue());
+        }
+        
+        // Track E blocks from previous (higher) Y level
+        Set<BlockPos> previousEBlocks = new HashSet<>();
+        
+        // Process each Y level from highest to lowest
+        for (int i = 0; i < sortedYLevels.size(); i++) {
+            int currentY = sortedYLevels.get(i);
             
-            CRLayers.LOGGER.info("Processing Y={} with {} positions", currentY, positions.size());
+            // Skip generation on highest and lowest Y levels, but still classify them
+            boolean isHighest = (i == 0);
+            boolean isLowest = (i == sortedYLevels.size() - 1);
+            boolean shouldGenerate = !isHighest && !isLowest;
             
-            // For each position at this Y level
-            for (BlockPos pos : positions) {
-                ChunkPos posChunk = new ChunkPos(pos);
-                if (!targetChunks.contains(posChunk)) continue;
+            CRLayers.LOGGER.info("Processing Y level {} (generate={})", currentY, shouldGenerate);
+            
+            // Step 1: Classify blocks at this Y level
+            Set<BlockPos> hBlocks = new HashSet<>();
+            Set<BlockPos> eBlocks = new HashSet<>();
+            Set<BlockPos> lBlocks = new HashSet<>();
+            
+            classifyBlocksAtYLevel(currentY, fullHeightmap, xzToHeight, validPositions, 
+                targetChunks, previousEBlocks, hBlocks, eBlocks, lBlocks);
+            
+            CRLayers.LOGGER.info("Y={}: H={}, E={}, L={}", currentY, hBlocks.size(), eBlocks.size(), lBlocks.size());
+            
+            // Only generate layers if not highest/lowest
+            if (shouldGenerate) {
+                // Step 2: Spread layers from H blocks
+                spreadLayersFromHBlocks(currentY, hBlocks, lBlocks, eBlocks, layerValues);
                 
-                // Skip edges
-                if (edges.containsKey(pos)) continue;
-                
-                // Check if we're at the base of higher terrain
-                int distanceToHigherTerrain = findDistanceToHigherTerrain(pos, currentY, fullHeightmap);
-                
-                if (distanceToHigherTerrain == Integer.MAX_VALUE) {
-                    // No higher terrain nearby, skip
-                    continue;
+                // Step 3: Smoothing passes
+                for (int cycle = 0; cycle < LayerConfig.SMOOTHING_CYCLES; cycle++) {
+                    smoothingPass(currentY, lBlocks, hBlocks, eBlocks, layerValues);
                 }
-                
-                // Find how much space we have at this Y level before hitting an edge/hole
-                int spaceAtSameLevel = findSpaceAtSameLevel(pos, currentY, fullHeightmap, edges);
-                
-                // Total available space
-                int availableSpace = distanceToHigherTerrain + spaceAtSameLevel;
-                
-                // Calculate layers
-                int layers = calculateAdaptiveBasicLayers(distanceToHigherTerrain, availableSpace);
-                
-                if (layers > 0) {
-                    layerValues.put(pos, layers);
-                    
-                    if (availableSpace < 7 || distanceToHigherTerrain <= 2) {
-                        CRLayers.LOGGER.info("Y={} pos {} - distToHigher={}, spaceAtLevel={}, total={} -> {} layers",
-                            currentY, pos, distanceToHigherTerrain, spaceAtSameLevel, availableSpace, layers);
-                    }
+            }
+            
+            // Remember E blocks for next (lower) Y level
+            previousEBlocks = eBlocks;
+        }
+        
+        return layerValues;
+    }
+
+    /**
+     * Classify all blocks at given Y level into H, E, or L blocks
+     * H blocks are inherited from E blocks of the Y level above
+     * E blocks have lower neighbors OR missing neighbors (holes/edges)
+     */
+    private void classifyBlocksAtYLevel(int currentY, 
+                                        Map<BlockPos, Integer> fullHeightmap,
+                                        Map<String, Integer> xzToHeight,
+                                        Map<BlockPos, Integer> validPositions,
+                                        Set<ChunkPos> targetChunks,
+                                        Set<BlockPos> previousEBlocks,
+                                        Set<BlockPos> hBlocks,
+                                        Set<BlockPos> eBlocks,
+                                        Set<BlockPos> lBlocks) {
+        
+        // First, inherit H blocks from previous Y level's E blocks
+        for (BlockPos prevE : previousEBlocks) {
+            // The position directly below an E block becomes an H block
+            BlockPos hPos = new BlockPos(prevE.getX(), currentY, prevE.getZ());
+            
+            // Check if there's terrain at or above current Y at this X,Z
+            String key = hPos.getX() + "," + hPos.getZ();
+            Integer surfaceHeight = xzToHeight.get(key);
+            
+            // If there's terrain at this X,Z and surface is at or above currentY
+            // then there must be a block at currentY (it's inside/below the terrain)
+            if (surfaceHeight != null && surfaceHeight >= currentY) {
+                ChunkPos posChunk = new ChunkPos(hPos);
+                if (targetChunks.contains(posChunk)) {
+                    hBlocks.add(hPos);
+                    CRLayers.LOGGER.info("H block at {} (inherited from E at Y={})", hPos, prevE.getY());
                 }
             }
         }
         
-        return layerValues;
+        // Find all positions at this Y level
+        for (Map.Entry<BlockPos, Integer> entry : fullHeightmap.entrySet()) {
+            if (entry.getValue() != currentY) continue;
+            
+            BlockPos pos = entry.getKey();
+            
+            // Only process positions in target chunks
+            ChunkPos posChunk = new ChunkPos(pos);
+            if (!targetChunks.contains(posChunk)) continue;
+            
+            // Skip if already classified as H
+            if (hBlocks.contains(pos)) continue;
+            
+            // Check ALL 8 neighbors (orthogonal + diagonal)
+            boolean hasLowerNeighbor = false;
+            boolean hasMissingNeighbor = false;
+            
+            int[] offsets = {-1, 0, 1};
+            for (int dx : offsets) {
+                for (int dz : offsets) {
+                    if (dx == 0 && dz == 0) continue;
+                    
+                    String key = (pos.getX() + dx) + "," + (pos.getZ() + dz);
+                    Integer neighborHeight = xzToHeight.get(key);
+                    
+                    if (neighborHeight == null) {
+                        // Missing neighbor = hole/edge
+                        hasMissingNeighbor = true;
+                    } else if (neighborHeight < currentY) {
+                        hasLowerNeighbor = true;
+                    }
+                }
+            }
+            
+            // E block if has lower OR missing neighbor (including diagonals)
+            if (hasLowerNeighbor || hasMissingNeighbor) {
+                eBlocks.add(pos);
+            } else {
+                // Only add to L blocks if it's a valid position
+                if (validPositions.containsKey(pos)) {
+                    lBlocks.add(pos);
+                }
+            }
+        }
+    }
+
+    /**
+     * Single smoothing pass
+     * Only smooths L blocks that have at least two cardinal neighbors that are H, E, or have a layer value.
+     * Smoothing calculation and max neighbor comparison consider only cardinal neighbors.
+     */
+    private void smoothingPass(int currentY,
+                            Set<BlockPos> lBlocks,
+                            Set<BlockPos> hBlocks,
+                            Set<BlockPos> eBlocks,
+                            Map<BlockPos, Integer> layerValues) {
+        
+        Map<BlockPos, Integer> newValues = new HashMap<>();
+        
+        int[][] cardinalOffsets = {
+            { 1, 0 },  // East
+            { -1, 0 }, // West
+            { 0, 1 },  // South
+            { 0, -1 }  // North
+        };
+        
+        for (BlockPos lBlock : lBlocks) {
+            // Skip if already has a layer value
+            //if (layerValues.containsKey(lBlock)) continue;
+
+            int sum = 0;
+            int count = 0;
+            int maxCardinalNeighborValue = 0;
+
+            // Only consider the 4 cardinal neighbors
+            for (int[] offset : cardinalOffsets) {
+                BlockPos neighbor = new BlockPos(lBlock.getX() + offset[0], currentY, lBlock.getZ() + offset[1]);
+                
+                if (hBlocks.contains(neighbor)) {
+                    sum += 8;
+                    count++;
+                    maxCardinalNeighborValue = Math.max(maxCardinalNeighborValue, 8);
+                } else if (eBlocks.contains(neighbor)) {
+                    sum += 0;
+                    count++;
+                } else if (layerValues.containsKey(neighbor)) {
+                    int neighborValue = layerValues.get(neighbor);
+                    sum += neighborValue;
+                    count++;
+                    maxCardinalNeighborValue = Math.max(maxCardinalNeighborValue, neighborValue);
+                }
+            }
+
+            // Require at least two valid cardinal neighbors
+            if (count < 2) continue;
+
+            // Only smooth if max cardinal neighbor value is at least 2
+            if (maxCardinalNeighborValue >= 2) {
+                double average = (double) sum / count;
+                int value;
+                
+                if (LayerConfig.SMOOTHING_ROUNDING_MODE == LayerConfig.RoundingMode.UP) {
+                    value = (int) Math.ceil(average);
+                } else if (LayerConfig.SMOOTHING_ROUNDING_MODE == LayerConfig.RoundingMode.DOWN) {
+                    value = (int) Math.floor(average);
+                } else { // NEAREST
+                    value = (int) Math.round(average);
+                }
+                
+                // Clamp to valid range 1-7
+                value = Math.max(1, Math.min(7, value));
+
+                // Ensure smoothed value is strictly less than max cardinal neighbor
+                if (value >= maxCardinalNeighborValue) {
+                    value = maxCardinalNeighborValue - 1;
+                    if (value < 1) value = 1; // safety clamp
+                }
+
+                newValues.put(lBlock, value);
+            }
+        }
+        
+        // Apply new values
+        layerValues.putAll(newValues);
+    }
+
+    /**
+     * Spread layers from all H blocks in 8 directions
+     */
+    private void spreadLayersFromHBlocks(int currentY, 
+                                        Set<BlockPos> hBlocks,
+                                        Set<BlockPos> lBlocks,
+                                        Set<BlockPos> eBlocks,
+                                        Map<BlockPos, Integer> layerValues) {
+        
+        // 8 directions: N, NE, E, SE, S, SW, W, NW
+        int[][] directions = {
+            {0, -1},  // N
+            {1, -1},  // NE (diagonal)
+            {1, 0},   // E
+            {1, 1},   // SE (diagonal)
+            {0, 1},   // S
+            {-1, 1},  // SW (diagonal)
+            {-1, 0},  // W
+            {-1, -1}  // NW (diagonal)
+        };
+        
+        for (BlockPos hBlock : hBlocks) {
+            for (int dirIdx = 0; dirIdx < directions.length; dirIdx++) {
+                int[] dir = directions[dirIdx];
+                boolean isDiagonal = (dir[0] != 0 && dir[1] != 0);
+                
+                // Walk in this direction and collect L blocks
+                List<BlockPos> pathLBlocks = new ArrayList<>();
+                
+                for (int step = 1; step <= LayerConfig.MAX_LAYER_DISTANCE; step++) {
+                    BlockPos checkPos = new BlockPos(
+                        hBlock.getX() + dir[0] * step,
+                        currentY,
+                        hBlock.getZ() + dir[1] * step
+                    );
+                    
+                    // Stop if we hit H or E block
+                    if (hBlocks.contains(checkPos) || eBlocks.contains(checkPos)) {
+                        break;
+                    }
+                    
+                    // Stop if not an L block
+                    if (!lBlocks.contains(checkPos)) {
+                        break;
+                    }
+                    
+                    pathLBlocks.add(checkPos);
+                }
+                
+                // Apply gradient based on available blocks
+                if (!pathLBlocks.isEmpty()) {
+                    applyGradient(pathLBlocks, isDiagonal, layerValues);
+                }
+            }
+        }
+    }
+
+    /**
+     * Apply gradient to a path of L blocks
+     */
+    private void applyGradient(List<BlockPos> path, boolean isDiagonal, Map<BlockPos, Integer> layerValues) {
+        int availableBlocks = path.size();
+        int[] gradient = getGradientForSpace(availableBlocks, isDiagonal);
+        
+        for (int i = 0; i < path.size() && i < gradient.length; i++) {
+            BlockPos pos = path.get(i);
+            int newValue = gradient[i];
+            
+            // Take max of existing and new value
+            Integer existing = layerValues.get(pos);
+            if (existing == null || newValue > existing) {
+                layerValues.put(pos, newValue);
+            }
+        }
+    }
+
+    /**
+     * Get gradient array for given available space
+     */
+    private int[] getGradientForSpace(int space, boolean isDiagonal) {
+        if (isDiagonal) {
+            return getDiagonalGradient(space);
+        } else {
+            return getNormalGradient(space);
+        }
+    }
+
+    private int[] getNormalGradient(int space) {
+        if (space >= 7) {
+            return new int[]{7, 6, 5, 4, 3, 2, 1};
+        } else if (space == 6) {
+            return new int[]{7, 6, 5, 3, 2, 1};
+        } else if (space == 5) {
+            return new int[]{6, 5, 4, 2, 1};
+        } else if (space == 4) {
+            return new int[]{7, 5, 3, 1};
+        } else if (space == 3) {
+            return new int[]{6, 4, 2};
+        } else if (space == 2) {
+            return new int[]{5, 2};
+        } else if (space == 1) {
+            return new int[]{4};
+        }
+        return new int[0];
+    }
+
+    private int[] getDiagonalGradient(int space) {
+        // if (space >= 7) {
+        //     return new int[]{6, 4, 2};
+        // } else if (space == 6) {
+        //     return new int[]{6, 3, 1};
+        // } else if (space == 5) {
+        //     return new int[]{5, 3, 1};
+        // } else if (space == 4) {
+        //     return new int[]{5, 3, 1};
+        // } else if (space == 3) {
+        //     return new int[]{4, 2};
+        // } else if (space == 2) {
+        //     return new int[]{3, 1};
+        // } else if (space == 1) {
+        //     return new int[]{4};
+        // }
+        return new int[0];
+    }
+
+    /**
+     * Apply offset to gradient and clamp to valid range (1-7)
+     */
+    private int[] applyOffset(int[] base, int offset) {
+        if (offset == 0) return base;
+        
+        int[] result = new int[base.length];
+        int validCount = 0;
+        
+        for (int i = 0; i < base.length; i++) {
+            int value = base[i] - offset;
+            if (value >= 1 && value <= 7) {
+                result[validCount++] = value;
+            }
+        }
+        
+        // Return only valid values
+        if (validCount == 0) {
+            return new int[0];
+        }
+        
+        int[] trimmed = new int[validCount];
+        System.arraycopy(result, 0, trimmed, 0, validCount);
+        return trimmed;
     }
 
     /**
@@ -996,7 +1321,7 @@ public class LayerGenerator {
         int minZ = center.getZ() - radius;
         int maxZ = center.getZ() + radius;
         
-        // Collect ALL surface heights (unfiltered) for edge detection
+        // Collect ALL surface heights (unfiltered)
         Map<BlockPos, Integer> allSurfaceHeights = new HashMap<>();
         
         for (int x = minX; x <= maxX; x++) {
@@ -1010,7 +1335,7 @@ public class LayerGenerator {
             }
         }
         
-        // Collect VALID surface heights (filtered) for placement
+        // Collect VALID surface heights (filtered)
         Map<BlockPos, Integer> validSurfaceHeights = new HashMap<>();
         Map<BlockPos, Block> surfaceBlocks = new HashMap<>();
         
@@ -1047,125 +1372,128 @@ public class LayerGenerator {
             }
         }
         
-        // Identify edges using FULL heightmap
-        Map<String, BlockPos> xzLookup = new HashMap<>();
-        for (BlockPos pos : allSurfaceHeights.keySet()) {
-            String key = pos.getX() + "," + pos.getZ();
-            xzLookup.put(key, pos);
-        }
+        // Get all unique Y levels and sort
+        Set<Integer> allYLevels = new HashSet<>(allSurfaceHeights.values());
+        List<Integer> sortedYLevels = new ArrayList<>(allYLevels);
+        Collections.sort(sortedYLevels, Collections.reverseOrder());
         
-        Map<BlockPos, Integer> edges = new HashMap<>();
-        for (Map.Entry<BlockPos, Integer> entry : allSurfaceHeights.entrySet()) {
-            BlockPos pos = entry.getKey();
-            int height = entry.getValue();
-            
-            boolean hasLowerNeighbor = false;
-            int[] offsets = {-1, 0, 1};
-            
-            for (int dx : offsets) {
-                for (int dz : offsets) {
-                    if (dx == 0 && dz == 0) continue;
-                    
-                    String neighborKey = (pos.getX() + dx) + "," + (pos.getZ() + dz);
-                    BlockPos neighborPos = xzLookup.get(neighborKey);
-                    
-                    if (neighborPos != null) {
-                        Integer neighborHeight = allSurfaceHeights.get(neighborPos);
-                        if (neighborHeight != null && (height - neighborHeight) >= LayerConfig.EDGE_HEIGHT_THRESHOLD) {
-                            hasLowerNeighbor = true;
-                            break;
-                        }
-                    }
-                }
-                if (hasLowerNeighbor) break;
-            }
-            
-            if (hasLowerNeighbor) {
-                edges.put(pos, height);
-            }
-        }
-        
-        // Calculate layer values for VALID positions using FULL heightmap for distances
-        Map<BlockPos, Integer> layerValues = new HashMap<>();
-        
-        for (Map.Entry<BlockPos, Integer> entry : validSurfaceHeights.entrySet()) {
-            BlockPos pos = entry.getKey();
-            int posHeight = entry.getValue();
-            
-            if (edges.containsKey(pos)) continue;
-            
-            int distanceToHigher = calculateDistanceToHigherEdge(pos, posHeight, edges);
-            if (distanceToHigher == Integer.MAX_VALUE) continue;
-            
-            // Use FULL heightmap for distance calculation
-            int distanceToLower = calculateDistanceToLowerOrSameEdge(pos, posHeight, allSurfaceHeights);
-            int availableSpace = distanceToHigher + distanceToLower;
-            
-            int layers = calculateAdaptiveBasicLayers(distanceToHigher, availableSpace);
-            if (layers > 0) {
-                layerValues.put(pos, layers);
-            }
-        }
-        
-        // Build output grids - use validSurfaceHeights for xzLookup in display
-        Map<String, BlockPos> validXzLookup = new HashMap<>();
-        for (BlockPos pos : validSurfaceHeights.keySet()) {
-            String key = pos.getX() + "," + pos.getZ();
-            validXzLookup.put(key, pos);
-        }
-        
-        // Build output grids
+        // Build header
         String header = String.format("Debug Export - Center: %s, Radius: %d blocks\n", center, radius);
         header += String.format("Area: X=%d to %d, Z=%d to %d\n", minX, maxX, minZ, maxZ);
-        header += String.format("Mode: %s, Max Distance: %d\n\n", LayerConfig.MODE, LayerConfig.MAX_LAYER_DISTANCE);
+        header += String.format("Mode: %s, Max Distance: %d\n", LayerConfig.MODE, LayerConfig.MAX_LAYER_DISTANCE);
+        header += String.format("Smoothing Cycles: %d, Rounding: %s\n\n", LayerConfig.SMOOTHING_CYCLES, LayerConfig.SMOOTHING_ROUNDING_MODE);
         
         logOutput.append(header);
         fileOutput.append(header);
         
-        // Y-Level Matrix - show VALID surfaces only
-        String yMatrix = buildMatrix("Y-LEVELS (Surface Height)", minX, maxX, minZ, maxZ, 
-            (x, z) -> {
-                String key = x + "," + z;
-                BlockPos pos = validXzLookup.get(key);
-                if (pos == null) return "  --";
-                Integer height = validSurfaceHeights.get(pos);
-                if (height == null) return "  --";
-                boolean isEdge = edges.containsKey(pos);
-                return String.format(isEdge ? "[%2d]" : " %2d ", height);
-            });
+        // Show Y levels
+        logOutput.append("=== Y LEVELS FOUND ===\n");
+        fileOutput.append("=== Y LEVELS FOUND ===\n");
+        for (int y : sortedYLevels) {
+            int count = 0;
+            for (int height : allSurfaceHeights.values()) {
+                if (height == y) count++;
+            }
+            String line = String.format("Y=%d: %d blocks\n", y, count);
+            logOutput.append(line);
+            fileOutput.append(line);
+        }
+        logOutput.append("\n");
+        fileOutput.append("\n");
         
-        logOutput.append(yMatrix).append("\n");
-        fileOutput.append(yMatrix).append("\n");
+        // Calculate what layers WOULD be placed with current algorithm
+        Set<ChunkPos> targetChunks = new HashSet<>();
+        targetChunks.add(new ChunkPos(center));
         
-        // ACTUAL Layer Values Matrix
-        String actualMatrix = buildMatrix("ACTUAL LAYERS IN WORLD (0=no layers, E=edge)", minX, maxX, minZ, maxZ,
-            (x, z) -> {
-                String key = x + "," + z;
-                BlockPos pos = validXzLookup.get(key);
-                if (pos == null) return " --";
-                if (edges.containsKey(pos)) return " E ";
-                Integer layers = actualLayers.get(pos);
-                if (layers == null) return " 0 ";
-                return String.format(" %d ", layers);
-            });
+        Map<BlockPos, Integer> edges = identifyEdges(allSurfaceHeights);
         
-        logOutput.append(actualMatrix).append("\n");
-        fileOutput.append(actualMatrix).append("\n");
+        Map<BlockPos, Integer> calculatedLayers = calculateLayerValues(
+            validSurfaceHeights,
+            allSurfaceHeights,
+            edges,
+            targetChunks
+        );
         
-        // CALCULATED Layer Values Matrix
-        String layerMatrix = buildMatrix("CALCULATED LAYER VALUES (what would be placed)", minX, maxX, minZ, maxZ,
-            (x, z) -> {
-                String key = x + "," + z;
-                BlockPos pos = validXzLookup.get(key);
-                if (pos == null) return " --";
-                if (edges.containsKey(pos)) return " E ";
-                Integer layers = layerValues.get(pos);
-                if (layers == null) return " 0 ";
-                return String.format(" %d ", layers);
-            });
+        // Create XZ lookup for heightmap
+        Map<String, Integer> xzToHeight = new HashMap<>();
+        for (Map.Entry<BlockPos, Integer> entry : allSurfaceHeights.entrySet()) {
+            String key = entry.getKey().getX() + "," + entry.getKey().getZ();
+            xzToHeight.put(key, entry.getValue());
+        }
         
-        logOutput.append(layerMatrix).append("\n");
-        fileOutput.append(layerMatrix).append("\n");
+        // Track E blocks from previous Y level (for H block inheritance)
+        Set<BlockPos> previousEBlocks = new HashSet<>();
+        
+        // Build output for each Y level
+        for (int currentY : sortedYLevels) {
+            logOutput.append(String.format("=== Y LEVEL %d ===\n\n", currentY));
+            fileOutput.append(String.format("=== Y LEVEL %d ===\n\n", currentY));
+            
+            // Classify blocks at this Y level using same logic as generation
+            Set<BlockPos> hBlocks = new HashSet<>();
+            Set<BlockPos> eBlocks = new HashSet<>();
+            Set<BlockPos> lBlocks = new HashSet<>();
+            
+            classifyBlocksAtYLevel(currentY, allSurfaceHeights, xzToHeight, validSurfaceHeights, 
+                targetChunks, previousEBlocks, hBlocks, eBlocks, lBlocks);
+            
+            // Create position lookup for this Y level
+            Map<String, BlockPos> xzLookup = new HashMap<>();
+            for (Map.Entry<BlockPos, Integer> entry : allSurfaceHeights.entrySet()) {
+                if (entry.getValue() == currentY) {
+                    String key = entry.getKey().getX() + "," + entry.getKey().getZ();
+                    xzLookup.put(key, entry.getKey());
+                }
+            }
+            
+            if (xzLookup.isEmpty()) {
+                previousEBlocks = eBlocks;
+                continue;
+            }
+            
+            // Actual layers at this Y
+            String actualMatrix = buildMatrix(
+                String.format("ACTUAL LAYERS (Y=%d) - H=Higher Edge, E=Lower Edge, 0-7=Layers", currentY), 
+                minX, maxX, minZ, maxZ,
+                (x, z) -> {
+                    String key = x + "," + z;
+                    BlockPos pos = xzLookup.get(key);
+                    if (pos == null) return " --";
+                    
+                    if (hBlocks.contains(pos)) return " H ";
+                    if (eBlocks.contains(pos)) return " E ";
+                    
+                    Integer layers = actualLayers.get(pos);
+                    if (layers == null) return " 0 ";
+                    return String.format(" %d ", layers);
+                });
+            
+            logOutput.append(actualMatrix).append("\n");
+            fileOutput.append(actualMatrix).append("\n");
+            
+            // Calculated layers at this Y
+            String calculatedMatrix = buildMatrix(
+                String.format("CALCULATED LAYERS (Y=%d) - H=Higher Edge, E=Lower Edge, 0-7=Layers", currentY), 
+                minX, maxX, minZ, maxZ,
+                (x, z) -> {
+                    String key = x + "," + z;
+                    BlockPos pos = xzLookup.get(key);
+                    if (pos == null) return " --";
+                    
+                    if (hBlocks.contains(pos)) return " H ";
+                    if (eBlocks.contains(pos)) return " E ";
+                    
+                    Integer layers = calculatedLayers.get(pos);
+                    if (layers == null) return " 0 ";
+                    return String.format(" %d ", layers);
+                });
+            
+            logOutput.append(calculatedMatrix).append("\n\n");
+            fileOutput.append(calculatedMatrix).append("\n\n");
+            
+            // Remember E blocks for next (lower) Y level
+            previousEBlocks = eBlocks;
+        }
         
         // Log to console
         CRLayers.LOGGER.info("\n" + logOutput.toString());
@@ -1182,6 +1510,18 @@ public class LayerGenerator {
             CRLayers.LOGGER.error("Failed to write debug file", e);
             return "ERROR: " + e.getMessage();
         }
+    }
+
+    /**
+     * Helper to find BlockPos by X,Z coordinates in a map
+     */
+    private BlockPos findPosByXZ(int x, int z, Map<BlockPos, Integer> heightmap) {
+        for (BlockPos pos : heightmap.keySet()) {
+            if (pos.getX() == x && pos.getZ() == z) {
+                return pos;
+            }
+        }
+        return null;
     }
 
     /**

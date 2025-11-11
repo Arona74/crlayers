@@ -34,4 +34,23 @@ public class LayerConfig {
         BASIC,  // Linear gradient: 7→6→5→4→3→2→1
         SMOOTH  // Gradual steps: 7,7→6,6→5,5→4,4→3,3→2,2→1,1 (for flat terrain)
     }
+
+    /**
+     * Number of smoothing cycles to run after layer spreading
+     * More cycles = smoother transitions between layers
+     * 
+     * Recommended: 4-8 cycles
+     */
+    public static int SMOOTHING_CYCLES = 6;
+
+    /**
+     * How to round averages during smoothing
+     */
+    public static RoundingMode SMOOTHING_ROUNDING_MODE = RoundingMode.NEAREST;
+
+    public enum RoundingMode {
+        UP,      // Always round up (more aggressive layers)
+        DOWN,    // Always round down (more conservative)  
+        NEAREST  // Round to nearest integer
+    }
 }
