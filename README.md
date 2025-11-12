@@ -1,6 +1,6 @@
 # CR Layers Generator
 
-A Fabric mod for Minecraft 1.20.1 that automatically generates/remove Conquest Reforged terrain layers based on the surrounding blocks.
+A Fabric mod for Minecraft 1.20.1 that automatically generate/remove Conquest Reforged terrain layers based on the surrounding blocks.
 
 ## Features
 
