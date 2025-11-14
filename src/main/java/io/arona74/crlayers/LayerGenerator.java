@@ -501,6 +501,7 @@ public class LayerGenerator {
             int sum = 0;
             int count = 0;
             int maxCardinalNeighborValue = 0;
+            boolean hasEBlockNeighbor = false;
 
             // Only consider the 4 cardinal neighbors
             for (int[] offset : cardinalOffsets) {
@@ -513,6 +514,7 @@ public class LayerGenerator {
                 } else if (eBlocks.contains(neighbor)) {
                     sum += 0;
                     count++;
+                    hasEBlockNeighbor = true;
                 } else if (layerValues.containsKey(neighbor)) {
                     int neighborValue = layerValues.get(neighbor);
                     sum += neighborValue;
@@ -546,9 +548,23 @@ public class LayerGenerator {
                     if (value < 1) value = 1; // safety clamp
                 }
 
-                // IMPORTANT: Only apply smoothing if it INCREASES the value (preserves extended gradients)
-                if (existingValue == null || value > existingValue) {
-                    newValues.put(lBlock, value);
+                // Apply smoothing based on priority mode
+                if (LayerConfig.SMOOTHING_PRIORITY == LayerConfig.SmoothingPriority.UP) {
+                    // UP: Only apply smoothing if it INCREASES the value (preserves extended gradients)
+                    if (existingValue == null || value > existingValue) {
+                        newValues.put(lBlock, value);
+                    }
+                } else {
+                    // DOWN: Hybrid approach
+                    if (hasEBlockNeighbor) {
+                        // Near edges: Traditional smoothing (always apply)
+                        newValues.put(lBlock, value);
+                    } else {
+                        // Away from edges: Preserve gradients (only apply if higher, like UP mode)
+                        if (existingValue == null || value > existingValue) {
+                            newValues.put(lBlock, value);
+                        }
+                    }
                 }
             }
         }
@@ -567,16 +583,12 @@ public class LayerGenerator {
                                         Map<BlockPos, Integer> layerValues,
                                         int maxDistance) {
 
-        // 8 directions: N, NE, E, SE, S, SW, W, NW
+        // 4 directions: N, E, S, W
         int[][] directions = {
             {0, -1},  // N
-            {1, -1},  // NE (diagonal)
             {1, 0},   // E
-            {1, 1},   // SE (diagonal)
             {0, 1},   // S
-            {-1, 1},  // SW (diagonal)
             {-1, 0},  // W
-            {-1, -1}  // NW (diagonal)
         };
 
         // Track path length statistics
@@ -587,7 +599,6 @@ public class LayerGenerator {
         for (BlockPos hBlock : hBlocks) {
             for (int dirIdx = 0; dirIdx < directions.length; dirIdx++) {
                 int[] dir = directions[dirIdx];
-                boolean isDiagonal = (dir[0] != 0 && dir[1] != 0);
 
                 // Walk in this direction and collect L blocks
                 List<BlockPos> pathLBlocks = new ArrayList<>();
@@ -619,7 +630,7 @@ public class LayerGenerator {
                     int pathLength = pathLBlocks.size();
                     pathLengthCounts.put(pathLength, pathLengthCounts.getOrDefault(pathLength, 0) + 1);
                     pathsWithLayers++;
-                    applyGradient(pathLBlocks, isDiagonal, layerValues);
+                    applyGradient(pathLBlocks, layerValues);
                 }
             }
         }
@@ -645,9 +656,9 @@ public class LayerGenerator {
     /**
      * Apply gradient to a path of L blocks
      */
-    private void applyGradient(List<BlockPos> path, boolean isDiagonal, Map<BlockPos, Integer> layerValues) {
+    private void applyGradient(List<BlockPos> path, Map<BlockPos, Integer> layerValues) {
         int availableBlocks = path.size();
-        int[] gradient = getGradientForSpace(availableBlocks, isDiagonal);
+        int[] gradient = getGradient(availableBlocks);
 
         for (int i = 0; i < path.size() && i < gradient.length; i++) {
             BlockPos pos = path.get(i);
@@ -661,28 +672,23 @@ public class LayerGenerator {
         }
     }
 
-    /**
-     * Get gradient array for given available space
-     */
-    private int[] getGradientForSpace(int space, boolean isDiagonal) {
-        if (isDiagonal) {
-            return getDiagonalGradient(space);
-        } else {
-            return getNormalGradient(space);
-        }
-    }
-
-    private int[] getNormalGradient(int space) {
+    private int[] getGradient(int space) {
         // EXTREME mode: use extreme gradients with triple repeated values
         if (LayerConfig.MODE == LayerConfig.GenerationMode.EXTREME) {
             return getExtremeNormalGradient(space);
         }
-
         // EXTENDED mode: use extended gradients with repeated values
         if (LayerConfig.MODE == LayerConfig.GenerationMode.EXTENDED) {
             return getExtendedNormalGradient(space);
         }
+        // BASIC mode: linear gradients
+        if (LayerConfig.MODE == LayerConfig.GenerationMode.BASIC) {
+            return getNormalGradient(space);
+        }
+        return new int[0];
+    }
 
+    private int[] getNormalGradient(int space) {
         // BASIC mode: linear gradients
         if (space >= 7) {
             return new int[]{7, 6, 5, 4, 3, 2, 1};
@@ -724,22 +730,9 @@ public class LayerGenerator {
             return new int[]{7, 6, 5, 4, 4, 3, 2, 1};
         }
         // For space <= 7, fall back to basic gradients
-        else if (space >= 7) {
-            return new int[]{7, 6, 5, 4, 3, 2, 1};
-        } else if (space >= 6) {
-            return new int[]{7, 6, 5, 3, 2, 1};
-        } else if (space >= 5) {
-            return new int[]{6, 5, 4, 2, 1};
-        } else if (space >= 4) {
-            return new int[]{7, 5, 3, 1};
-        } else if (space >= 3) {
-            return new int[]{6, 4, 2};
-        } else if (space >= 2) {
-            return new int[]{5, 2};
-        } else if (space >= 1) {
-            return new int[]{4};
+        else {
+            return getNormalGradient(space);
         }
-        return new int[0];
     }
 
     /**
@@ -767,12 +760,6 @@ public class LayerGenerator {
         else {
             return getExtendedNormalGradient(space);
         }
-    }
-
-    private int[] getDiagonalGradient(int space) {
-        // Diagonal gradients are currently disabled (return empty array)
-        // You can enable them if needed for more coverage
-        return new int[0];
     }
     
     /**
@@ -1027,7 +1014,15 @@ public class LayerGenerator {
                 surfacePos = surfacePos.down();
                 continue;
             }
-            
+
+            // Skip mushroom blocks (big mushroom structures)
+            if (block == Blocks.BROWN_MUSHROOM_BLOCK ||
+                block == Blocks.RED_MUSHROOM_BLOCK ||
+                block == Blocks.MUSHROOM_STEM) {
+                surfacePos = surfacePos.down();
+                continue;
+            }
+
             // Skip plants and flowers
             if (block.getDefaultState().isIn(net.minecraft.registry.tag.BlockTags.FLOWERS) ||
                 block.getDefaultState().isIn(net.minecraft.registry.tag.BlockTags.SAPLINGS) ||

@@ -9,5 +9,7 @@
   "_comment_smoothing_cycles": "Number of smoothing passes after layer spreading. More cycles = smoother transitions. Recommended: 4-8",
   "smoothing_cycles": 6,
   "_comment_smoothing_rounding_mode": "How to round averages during smoothing: UP (aggressive), DOWN (conservative), NEAREST (balanced)",
-  "smoothing_rounding_mode": "NEAREST"
+  "smoothing_rounding_mode": "DOWN",
+  "_comment_smoothing_priority": "Smoothing priority: UP (preserve higher gradient values), DOWN (traditional smoothing near edges)",
+  "smoothing_priority": "DOWN"
 }

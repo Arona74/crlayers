@@ -33,14 +33,15 @@ Remove layers in the specified chunk radius (default: 3, max: 32). Automatically
 
 ### Configuration
 ```
-/layerConfig show                        # Display current configuration
+/layerConfig show                           # Display current configuration
 /layerConfig mode <basic|extended|extreme>  # Set generation mode
-/layerConfig distance <blocks>           # Set max layer distance (3-25)
-/layerConfig edgeThreshold <blocks>      # Set edge height threshold (1-5)
-/layerConfig smoothingCycles <cycles>    # Set smoothing cycles (0-20)
-/layerConfig roundingMode <up|down|nearest>  # Set rounding mode
-/layerConfig preset <basic|extended|extreme>  # Apply preset configuration
-/layerConfig reload                      # Reload config from file
+/layerConfig distance <blocks>              # Set max layer distance (3-25)
+/layerConfig edgeThreshold <blocks>         # Set edge height threshold (1-5)
+/layerConfig smoothingCycles <cycles>       # Set smoothing cycles (0-20)
+/layerConfig roundingMode <up|down|nearest> # Set rounding mode
+/layerConfig smoothingPriority <up|down>    # Set smoothing priority
+/layerConfig preset <basic|extended|extreme> # Apply preset configuration
+/layerConfig reload                         # Reload config from file
 ```
 
 ### Presets
@@ -66,6 +67,7 @@ Configuration files are automatically created in `config/crlayers/` on first run
 - `edge_height_threshold`: Minimum height difference to detect edges
 - `smoothing_cycles`: Number of smoothing passes
 - `smoothing_rounding_mode`: Rounding method (UP, DOWN, NEAREST)
+- `smoothing_priority`: UP (preserve gradients) or DOWN (smooth near edges)
 
 **block_mappings.json**: Vanilla to Conquest Reforged block mappings
 ```json

@@ -68,6 +68,15 @@ public class LayerGeneratorCommand {
                     })
                     .executes(LayerGeneratorCommand::setRoundingMode)))
 
+            .then(CommandManager.literal("smoothingPriority")
+                .then(CommandManager.argument("priority", StringArgumentType.word())
+                    .suggests((context, builder) -> {
+                        builder.suggest("up");
+                        builder.suggest("down");
+                        return builder.buildFuture();
+                    })
+                    .executes(LayerGeneratorCommand::setSmoothingPriority)))
+
             .then(CommandManager.literal("reload")
                 .executes(LayerGeneratorCommand::reloadConfig))
 
@@ -209,7 +218,9 @@ public class LayerGeneratorCommand {
             "§eSmoothing Cycles: §f%d", LayerConfig.SMOOTHING_CYCLES)), false);
         source.sendFeedback(() -> Text.literal(String.format(
             "§eRounding Mode: §f%s", LayerConfig.SMOOTHING_ROUNDING_MODE.name())), false);
-        
+        source.sendFeedback(() -> Text.literal(String.format(
+            "§eSmoothing Priority: §f%s", LayerConfig.SMOOTHING_PRIORITY.name())), false);
+
         String modeDesc = switch (LayerConfig.MODE) {
             case BASIC -> "§7Linear gradient up to 7: 7→6→5→4→3→2→1";
             case EXTENDED -> "§7Gradual steps up to 14: 7,7→6,6→5,5→4,4→3,3→2,2→1,1";
@@ -304,6 +315,29 @@ public class LayerGeneratorCommand {
         return 1;
     }
 
+    private static int setSmoothingPriority(CommandContext<ServerCommandSource> context) {
+        ServerCommandSource source = context.getSource();
+        String priorityName = StringArgumentType.getString(context, "priority").toLowerCase();
+
+        LayerConfig.SmoothingPriority priority = switch (priorityName) {
+            case "up" -> LayerConfig.SmoothingPriority.UP;
+            case "down" -> LayerConfig.SmoothingPriority.DOWN;
+            default -> {
+                source.sendError(Text.literal("§cUnknown smoothing priority. Use: up or down"));
+                yield null;
+            }
+        };
+
+        if (priority == null) return 0;
+
+        LayerConfig.SMOOTHING_PRIORITY = priority;
+        LayerConfig.save();
+        source.sendFeedback(() -> Text.literal(
+            String.format("§aSet smoothing priority to: §f%s", priority.name())), true);
+
+        return 1;
+    }
+
     private static int reloadConfig(CommandContext<ServerCommandSource> context) {
         ServerCommandSource source = context.getSource();
 
@@ -333,6 +367,7 @@ public class LayerGeneratorCommand {
                     LayerConfig.EDGE_HEIGHT_THRESHOLD = 1;
                     LayerConfig.SMOOTHING_CYCLES = 6;
                     LayerConfig.SMOOTHING_ROUNDING_MODE = LayerConfig.RoundingMode.DOWN;
+                    LayerConfig.SMOOTHING_PRIORITY = LayerConfig.SmoothingPriority.DOWN;
                 }
                 case "extended" -> {
                     LayerConfig.MODE = LayerConfig.GenerationMode.EXTENDED;
@@ -340,6 +375,7 @@ public class LayerGeneratorCommand {
                     LayerConfig.EDGE_HEIGHT_THRESHOLD = 1;
                     LayerConfig.SMOOTHING_CYCLES = 13;
                     LayerConfig.SMOOTHING_ROUNDING_MODE = LayerConfig.RoundingMode.DOWN;
+                    LayerConfig.SMOOTHING_PRIORITY = LayerConfig.SmoothingPriority.DOWN;
                 }
                 case "extreme" -> {
                     LayerConfig.MODE = LayerConfig.GenerationMode.EXTREME;
@@ -347,6 +383,7 @@ public class LayerGeneratorCommand {
                     LayerConfig.EDGE_HEIGHT_THRESHOLD = 1;
                     LayerConfig.SMOOTHING_CYCLES = 20;
                     LayerConfig.SMOOTHING_ROUNDING_MODE = LayerConfig.RoundingMode.DOWN;
+                    LayerConfig.SMOOTHING_PRIORITY = LayerConfig.SmoothingPriority.DOWN;
                 }
                 default -> {
                     source.sendError(Text.literal("§cUnknown preset. Use: basic, extended, or extreme"));

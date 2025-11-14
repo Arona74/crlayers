@@ -21,6 +21,8 @@
     "minecraft:sunflower": "conquest:sunflower",
     "minecraft:lilac": "conquest:lilac",
     "minecraft:rose_bush": "conquest:rose_bush",
-    "minecraft:peony": "conquest:peony"
+    "minecraft:peony": "conquest:peony",
+    "minecraft:brown_mushroom": "conquest:brown_mushroom",
+    "minecraft:red_mushroom": "conquest:red_mushroom"
   }
 }

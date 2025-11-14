@@ -73,6 +73,18 @@ public class LayerConfig {
         NEAREST  // Round to nearest integer
     }
 
+    /**
+     * Smoothing priority mode
+     * UP: Only apply smoothing if it increases the value (preserves extended/extreme gradients)
+     * DOWN: Same as UP except near edge where it will use smoothed value even if it go down from existing value (traditional smoothing)
+     */
+    public static SmoothingPriority SMOOTHING_PRIORITY = SmoothingPriority.DOWN;
+
+    public enum SmoothingPriority {
+        UP,   // Always preserve higher gradient values (only smooth if it increases value)
+        DOWN  // Traditional smoothing near edges and always up everywhere else
+    }
+
     static {
         loadConfig();
     }
@@ -152,6 +164,15 @@ public class LayerConfig {
                 CRLayers.LOGGER.warn("Invalid rounding mode in config, using default");
             }
         }
+
+        if (config.has("smoothing_priority")) {
+            try {
+                SMOOTHING_PRIORITY = SmoothingPriority.valueOf(
+                    config.get("smoothing_priority").getAsString().toUpperCase());
+            } catch (IllegalArgumentException e) {
+                CRLayers.LOGGER.warn("Invalid smoothing priority in config, using default");
+            }
+        }
     }
 
     private static void createExternalConfig() {
@@ -204,6 +225,8 @@ public class LayerConfig {
             config.addProperty("smoothing_cycles", SMOOTHING_CYCLES);
             config.addProperty("_comment_smoothing_rounding_mode", "How to round averages during smoothing: UP (aggressive), DOWN (conservative), NEAREST (balanced)");
             config.addProperty("smoothing_rounding_mode", SMOOTHING_ROUNDING_MODE.name());
+            config.addProperty("_comment_smoothing_priority", "Smoothing priority: UP (preserve higher gradient values), DOWN (traditional smoothing near edges)");
+            config.addProperty("smoothing_priority", SMOOTHING_PRIORITY.name());
 
             try (Writer writer = Files.newBufferedWriter(configPath)) {
                 GSON.newBuilder().setPrettyPrinting().create().toJson(config, writer);
